@@ -52,9 +52,9 @@ fc_ls <- sumo_forecast(
   anomaly                = FALSE,
   use_covid              = TRUE,
   lags                   = 168,
-  #lags_seasonal          = 168,
+  lags_seasonal          = 168,
   ml_models              = c("xgboost", "catboost", "lightgbm"),
-  method                 = "seasonal",
+  method                 = c("recursive", "seasonal"),
   univar_models          = c("arima", "ets", "thief", "tbats", "stl_arima", "stl_ets", "prophet", "naive"),
   slice_limit            = 5,
   skip                   = 84,
@@ -64,7 +64,8 @@ fc_ls <- sumo_forecast(
   n_models_for_stability = 2,
   suffix                 = "168h",
   ceiling                = TRUE,
-  ensemble               = ensemble_ls
+  ensemble               = ensemble_ls,
+  parallel = FALSE
   )
 
 
