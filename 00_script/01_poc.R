@@ -34,7 +34,25 @@ data_prepared_tbl <- data_tbl %>%
   pad_by_time(.date_var = date, .pad_value = 0) %>% 
   mutate(id = "id")
 
+# By shift
+shift_data_tbl <- data_prepared_tbl %>% 
+  mutate(
+    hour = hour(date),
+    shift = 
+      case_when(hour %in% c(8:15) ~ "morning",
+                hour %in% c(0:7)  ~ "night",
+                TRUE ~ "afternoon"),
+    date_day = date(date)
+  ) %>% 
+  group_by(shift, date_day) %>% 
+  mutate(min_date = min(date)) %>% 
+  group_by(min_date) %>% 
+  summarise(outcome = sum(outcome)) %>% 
+  mutate(id = "id") %>% 
+  rename("date" = "min_date")
 
+
+# Daily
 data_daily_prepared_tbl <- data_prepared_tbl %>% 
   mutate(date = date(floor_date(date, "day"))) %>% 
   group_by(date) %>% 
@@ -46,11 +64,11 @@ data_daily_prepared_tbl <- data_prepared_tbl %>%
 
 # 3.1.0 Hourly data ----
 ensemble_ls <- list(
-  "ensemble_1" = c("tbats", "naive"),
+  "ensemble_1" = c("deepar", "prophet"),
   "ensemble_2" = c("deepar", "stl_ets"),
   "ensemble_3" = c("deepar", "tbats"),
-  "ensemble_4" = c("deepar", "tbats", "naive", "stl_ets"),
-  "ensemble_5" = c("seasonal_lightgbm_default", "prophet", "naive")
+  "ensemble_4" = c("deepar", "tbats", "stl_ets", "prophet"),
+  "ensemble_5" = c("deepar", "prophet", "tbats")
 )
 
 fc_ls <- sumo_forecast(
@@ -62,11 +80,12 @@ fc_ls <- sumo_forecast(
   use_covid              = TRUE,
   lags                   = 168,
   lags_seasonal          = 168,
-  ml_models              = c("catboost", "lightgbm", "xgboost", "cubist", "ranger"),
-  method                 = c("recursive", "seasonal"),
-  univar_models          = c("arima", "ets", "thief", "tbats", "stl_arima", "stl_ets", "prophet", "naive"),
+  ml_models              = NULL, #c("catboost", "lightgbm", "xgboost", "cubist", "ranger"),
+  method                 = c("recursive"),
+  univar_models          = c("tbats", "stl_ets", "prophet"),
+  deep_learning_models   = "deepar",
   slice_limit            = 5,
-  skip                   = 84,
+  skip                   = 168,
   azure_container        = "dev",
   client_name            = "patria",
   stability_measure      = "sd",
@@ -75,13 +94,16 @@ fc_ls <- sumo_forecast(
   ceiling                = TRUE,
   ensemble               = ensemble_ls,
   parallel               = FALSE,
-  azure_key              = Sys.getenv("AZURE_DEV")
+  azure_key              = Sys.getenv("AZURE_DEV"),
+  reuse_data_prepared = TRUE,
+  reuse_ml_resamples = TRUE,
+  reuse_univar_resamples = TRUE
   )
 
 
 fc_ls$resample_forecasts %>% 
   #group_by(resample) %>% 
-  filter(resample == "resample_2") %>% 
+  filter(resample == "resample_1") %>% 
   plot_modeltime_forecast(.facet_ncol = 3)
 
 
@@ -96,7 +118,11 @@ fc_ls$resample_accuracy %>%
     mean_mase = mean(mase)
   ) %>% 
   arrange(mean_rmse)
-  
+
+
+fc_ls$final_forecast %>% 
+  plot_modeltime_forecast()
+
 
 # Accuracy by sum
 
@@ -131,8 +157,82 @@ accuracy_per_shift_tbl %>%
   filter(name == "ensemble-deepar-stl_ets")
 
 
+# 3.2.0 Hourly by shift ---------------------------------------------------
+ensemble_ls <- list(
+  "ensemble_1" = c("tbats", "naive"),
+  "ensemble_2" = c("deepar", "stl_ets"),
+  "ensemble_3" = c("deepar", "tbats"),
+  "ensemble_4" = c("deepar", "tbats", "naive", "stl_ets"),
+  "ensemble_5" = c("seasonal_lightgbm_default", "prophet", "naive")
+)
 
-# 3.2.0 Daily data --------------------------------------------------------
+fc_ls <- sumo_forecast(
+  raw_data               = shift_data_tbl,
+  frequency              = "hourly",
+  horizon                = 21,
+  transformation         = "log1p",
+  anomaly                = FALSE,
+  use_covid              = TRUE,
+  lags                   = 21,
+  lags_seasonal          = 21,
+  ml_models              = c("catboost", "lightgbm", "xgboost", "cubist", "ranger"),
+  method                 = c("recursive", "seasonal"),
+  univar_models          = c("arima", "ets", "thief", "tbats", "stl_arima", "stl_ets", "prophet", "naive"),
+  slice_limit            = 5,
+  skip                   = 21,
+  deep_learning_models  = NULL,
+  azure_container        = "dev",
+  client_name            = "patria",
+  stability_measure      = "sd",
+  n_models_for_stability = 1,
+  suffix                 = "shift8h",
+  ceiling                = TRUE,
+  ensemble               = NULL,
+  parallel               = FALSE,
+  azure_key              = Sys.getenv("AZURE_DEV")
+)
+
+
+fc_ls$best_per_id
+
+
+fc_ls$resample_forecasts %>% 
+  filter(resample == "resample_5") %>% 
+  plot_modeltime_forecast()
+
+
+
+# test
+test_data_tbl <- tail(shift_data_tbl, 21)
+train_data_tbl <- shift_data_tbl %>% filter(!date %in% test_data_tbl$date)
+
+stl_arima <- exp_smoothing() %>% 
+  set_engine("ets") %>% 
+  fit(outcome ~ date, data = train_data_tbl) %>% 
+  modeltime_table()
+
+stl_arima %>% 
+  modeltime_forecast(
+    new_data = test_data_tbl,
+    actual_data = shift_data_tbl
+  ) %>% 
+  plot_modeltime_forecast()
+
+
+ds_mtbl <- deep_state(mode = "regression", id = "id", freq = "D", prediction_length = 21, lookback_length = 63) %>% 
+  set_engine("gluonts_deepstate") %>% 
+  fit(outcome ~ ., data = train_data_tbl) %>% 
+  modeltime_table()
+
+ds_mtbl %>% 
+  modeltime_forecast(
+    new_data = test_data_tbl,
+    actual_data = shift_data_tbl
+  ) %>% 
+  plot_modeltime_forecast()
+
+
+# 3.3.0 Daily data --------------------------------------------------------
 
 ensemble_ls <- list(
   "ensemble_1" = c("tbats", "naive"),
@@ -143,7 +243,7 @@ ensemble_ls <- list(
 )
 
 fc_daily_ls <- sumo_forecast(
-  raw_data               = data_daily_prepared_tbl %>% filter(date >= "2022-01-01"),
+  raw_data               = data_daily_prepared_tbl,
   frequency              = "daily",
   horizon                = 30,
   transformation         = "log1p",
@@ -168,7 +268,9 @@ fc_daily_ls <- sumo_forecast(
   azure_key              = Sys.getenv("AZURE_DEV")
 )
 
-
+fc_daily_ls$resample_forecasts %>% 
+  filter(resample == "resample_5") %>% 
+  plot_modeltime_forecast()
 
 
 
@@ -206,7 +308,7 @@ get_timegpt_fc <- function(data, horizon, freq, finetune_steps = 0) {
     finetune_steps = finetune_steps
   )
   
-  json_payload <- toJSON(payload, auto_unbox = TRUE)
+  json_payload <- toJSON(data_ls, auto_unbox = TRUE)
   
   url      <- "https://dashboard.nixtla.io/api/timegpt"
   encode   <- "json"
@@ -225,13 +327,13 @@ get_timegpt_fc <- function(data, horizon, freq, finetune_steps = 0) {
 
 
 timegpt_fc_tbl <- get_timegpt_fc(
-  data    = data_prepared_tbl %>% filter(date >= "2022-01-01"),
-  horizon = 168,
+  data    = shift_data_tbl,
+  horizon = 21,
   freq = "H",
-  finetune_steps = 50
+  finetune_steps = 0
   )
 
-fc_full_tbl <- data_prepared_tbl %>% 
+fc_full_tbl <- shift_data_tbl %>% 
   select(-id) %>% 
   mutate(what = "historical") %>% 
   bind_rows(timegpt_fc_tbl %>% 
@@ -251,12 +353,12 @@ library(tidyverse)
 library(tidymodels)
 source("00_script/nixtla_fcns.R")
 
-splits <- data_prepared_tbl %>% 
+splits <- shift_data_tbl %>% 
   rename("ds" = "date") %>% 
   rename("y" = "outcome") %>% 
   select(-id) %>% 
   mutate(unique_id = 1) %>% 
-  time_series_split(date_var = ds, assess = 168, cumulative = TRUE, slice = 1)
+  time_series_split(date_var = ds, assess = 21, cumulative = TRUE, slice = 1)
 
 train_df <- training(splits)
 test_df  <- testing(splits)

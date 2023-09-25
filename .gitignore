@@ -2,3 +2,5 @@
 .Rhistory
 .RData
 .Ruserdata
+01_output/
+lightning_logs/
